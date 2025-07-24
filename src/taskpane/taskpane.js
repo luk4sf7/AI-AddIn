@@ -1,158 +1,213 @@
-Office.onReady((info) => {
-  if (info.host === Office.HostType.Word) {
-    const chatForm = document.getElementById("chat-form");
-    const questionInput = document.getElementById("question");
-    const responseDiv = document.getElementById("response");
-    const button = document.getElementById("ask-button");
-    const buttonText = document.getElementById("button-text");
-    const spinner = document.getElementById("spinner");
-    const historyList = document.getElementById("history-list");
-    const clearHistoryButton = document.getElementById("clear-history");
-    const logo = document.querySelector(".logo");
+// taskpane.js
+// Runs in the task-pane (browser) context.
 
-    if (logo) {
-      logo.addEventListener("error", () => {
-        logo.style.display = "none"; 
-      });
+/* ==============================
+   🔧  Configuration
+   ============================== */
+const BASE_URL = 'https://aissociate.at'; // Don't use process.env in browser unless you inject it at build-time
+const API_KEY  = 'ck:4ea46438-b20e-438d-8127-55cd026e794b:c4207d7b-6885-432c-85b5-9ba938410992';
+
+
+const QUESTION   = 'Wann haftet der Geschäftsführer einer GmbH?';
+const LEGAL_AREA = 'zivilrechtogh';
+const SCOPE      = null;
+
+/* ==============================
+   🛫  Office initialization
+   ============================== */
+Office.onReady(() => {
+  const form           = document.getElementById('chat-form');
+  const textarea       = document.getElementById('question');
+  const askButton      = document.getElementById('ask-button');
+  const buttonText     = document.getElementById('button-text');
+  const spinner        = document.getElementById('spinner');
+  const responseBox    = document.getElementById('response');
+
+  // Optional: hooks for history (if you have these elements in HTML)
+  const historyList    = document.getElementById('history-list');
+  const clearHistoryBt = document.getElementById('clear-history');
+
+  /* ---------- Form submit handler ---------- */
+  form.addEventListener('submit', async (evt) => {
+    evt.preventDefault();
+    const question = textarea.value.trim();
+    if (!question) return;
+
+    toggleBusy(true);
+    responseBox.textContent = '';
+    responseBox.classList.remove('error');
+
+    try {
+      const answer = await streamAsk(question, { responseEl: responseBox });
+      // Optional: Add to history & save
+      if (historyList) addHistoryEntry({ q: question, a: answer });
+      if (typeof saveHistory === 'function') saveHistory();
+      // Optional: Insert answer into Word document
+      insertToDocument(answer);
+    } catch (err) {
+      console.error(err);
+      responseBox.textContent = `Fehler: ${err.message}`;
+      responseBox.classList.add('error');
+    } finally {
+      toggleBusy(false);
+      textarea.value = '';
+      textarea.focus();
+    }
+  });
+
+  /** Show / hide spinner & disable button */
+  function toggleBusy(isBusy) {
+    askButton.disabled = isBusy;
+    spinner.style.display = isBusy ? 'inline-block' : 'none';
+    buttonText.textContent = isBusy ? 'Wird generiert …' : 'Antwort generieren';
+  }
+
+  /**
+   * Streams an “ask” request and writes to responseEl progressively.
+   * Returns the full text at the end.
+   */
+  async function streamAsk(question, { legalArea = null, scope = null, files = [], responseEl } = {}) {
+    if (!API_KEY) {
+      throw new Error('AISSOCIATE_API_KEY fehlt oder ist leer.');
+    }
+    console.log(question);
+
+    const endpoint = `${BASE_URL}/api/public/v1/chat/ask`;
+    const payload  = {
+      question,
+      law:      legalArea,
+      sub_law:  scope,
+      file_context: files,
+      file_query_type: 'general',
+    };
+    console.log(payload);
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+        },
+        body: JSON.stringify(payload),
+        });
+    } catch (err) {
+      // This block triggers when the browser can't even start or finish the request
+      // (CORS blocked, DNS, SSL, network offline, mixed content, etc.)
+      if (err instanceof TypeError && /Failed to fetch/i.test(err.message)) {
+        throw new Error(
+          [
+            'Netzwerkfehler: „Failed to fetch“.',
+            'Ursachen können sein:',
+            '- CORS blockiert (API sendet keinen Access-Control-Allow-Origin Header)',
+            '- Domain nicht in AppDomains in der Office-Manifest-Datei',
+            '- HTTPS/SSL-Problem (Zertifikat nicht vertraut)',
+            '- Falsche URL/Endpoint',
+            '- Firmen-Firewall/Proxy blockiert',
+            '',
+            'Prüfe die Browser-Netzwerk-Konsole (DevTools → Network) & die Manifest-Datei.'
+          ].join('\n')
+        );
+      }
+      // Otherwise rethrow
+      throw err;
     }
 
-    // Formular-Submit-Handler
-    chatForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
 
-      const question = questionInput.value.trim();
-      if (!question) {
-        showError("Bitte gib eine Frage ein.");
-        return;
-      }
+    if (!res.ok || !res.body) {
+      const t = await res.text().catch(() => '');
+      throw new Error(`Request failed (${res.status}): ${t}`);
+    }
 
-      
-      button.disabled = true;
-      buttonText.style.opacity = "0.6";
-      spinner.style.display = "inline-block";
-      responseDiv.innerText = "Antwort wird generiert…";
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer    = '';
+    let fullText  = '';
 
-      try {
-        
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 100000);
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-        // AI:ssociate API-Anfrage
-        const res = await fetch("https://aissociate.at/api/public/v1/chat/ask", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": "ck:4ea46438-b20e-438d-8127-55cd026e794b:c4207d7b-6885-432c-85b5-9ba938410992",
-          },
-          body: JSON.stringify({
-            question: question,
-            law: "zivilrechtogh",
-            file_context: [],
-            file_query_type: "general"
+      // Split by blank line delimiter (end of SSE block)
+      const parts = buffer.split(/\r?\n\r?\n/);
+      buffer = parts.pop(); // keep remainder
 
-          }),
-          signal: controller.signal, // Für Timeout
-        });
+      for (const rawBlock of parts) {
+        if (!rawBlock.trim()) continue;
 
-        clearTimeout(timeoutId); 
+        const parsed = parseSSEBlock(rawBlock);
+        if (!parsed) continue;
 
-        if (!res.ok) {
-          const errorText = await res.text(); 
-          throw new Error(`API-Fehler: ${res.status} - ${res.statusText} - ${errorText}`);
+        if (parsed.type === 'ERROR') {
+          throw new Error(parsed.text || 'Unbekannter API-Fehler');
         }
 
-        // Streaming-Antwort verarbeiten
-        const reader = res.body.getReader();
-        let answer = "";
-        responseDiv.innerText = ""; 
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          // Text aus dem Stream dekodieren
-          const chunk = new TextDecoder().decode(value);
-          try {
-            // Angenommen, die API sendet JSON-Objekte mit einem `text`-Feld pro Event
-            const event = JSON.parse(chunk);
-            if (event.text) {
-              answer += event.text;
-              responseDiv.innerText = answer; 
-            }
-          } catch (e) {
-            answer += chunk;
-            responseDiv.innerText = answer;
+        if (parsed.type === 'message' && typeof parsed.text === 'string') {
+          fullText += parsed.text;
+          if (responseEl) {
+            responseEl.textContent += parsed.text;
+            responseEl.scrollTop = responseEl.scrollHeight;
           }
         }
-
-        // Antwort ins Word-Dokument einfügen
-        await Word.run(async (context) => {
-          const range = context.document.getSelection();
-          range.insertText(`Antwort von AI:SSOCIATE:\n${answer}\n`, Word.InsertLocation.end);
-          range.font.color = "#00798C";
-          await context.sync();
-        });
-
-        addToHistory(question, answer);
-
-        questionInput.value = "";
-        questionInput.focus();
-      } catch (err) {
-        // Detaillierte Fehlerbehandlung
-        let errorMessage = "Fehler bei der Anfrage: ";
-        if (err.name === "AbortError") {
-          errorMessage += "Die Anfrage hat zu lange gedauert (Timeout). Bitte überprüfe deine Internetverbindung.";
-        } else if (err.message.includes("Failed to fetch")) {
-          errorMessage += "Verbindung zur API fehlgeschlagen. Mögliche Ursachen:\n" +
-                         "- API-Server nicht erreichbar (überprüfe https://aissociate.at).\n" +
-                         "- CORS-Problem (Server erlaubt Anfragen von localhost nicht).\n" +
-                         "- Ungültiger API-Schlüssel.\n" +
-                         "Details: " + err.message;
-        } else {
-          errorMessage += err.message;
-        }
-        showError(errorMessage);
-        console.error("API Error:", err);
-      } finally {
-        // Button und Spinner zurücksetzen
-        button.disabled = false;
-        buttonText.style.opacity = "1";
-        spinner.style.display = "none";
-      }
-    });
-
-    clearHistoryButton.addEventListener("click", () => {
-      historyList.innerHTML = "";
-      responseDiv.innerText = "Verlauf gelöscht.";
-      setTimeout(() => {
-        responseDiv.innerText = "Noch keine Antwort.";
-      }, 2000);
-    });
-
-    function showError(message) {
-      responseDiv.innerText = message;
-      responseDiv.classList.add("error");
-      setTimeout(() => {
-        responseDiv.classList.remove("error");
-        responseDiv.innerText = "Noch keine Antwort.";
-      }, 5000); 
-    }
-
-    function addToHistory(question, answer) {
-      const entry = document.createElement("li");
-      entry.innerHTML = `<strong>Frage:</strong> ${sanitizeHTML(question)}<br><strong>Antwort:</strong> ${sanitizeHTML(answer)}`;
-      historyList.prepend(entry);
-      if (historyList.children.length > 10) {
-        historyList.removeChild(historyList.lastChild);
       }
     }
+    console.log('---');
+    console.log(question);
+    console.log(legalArea);
+    console.log('------');
 
-    // HTML-Injection verhindern
-    function sanitizeHTML(str) {
-      const div = document.createElement("div");
-      div.textContent = str;
-      return div.innerHTML;
+    return fullText.trim();
+  }
+
+  /**
+   * Parse a single SSE block (delimited by blank lines).
+   */
+  function parseSSEBlock(block) {
+    const lines = block.split(/\r?\n/);
+    let dataStr = '';
+    for (const line of lines) {
+      if (line.startsWith('data:')) {
+        dataStr += (dataStr ? '\n' : '') + line.slice(5).trim();
+      }
+    }
+    if (!dataStr) return null;
+    try {
+      return JSON.parse(dataStr);
+    } catch {
+      return null;
     }
   }
-});
-          
+
+  /* ------- Optional helpers for Office insertion & history ------- */
+
+  function insertToDocument(text) {
+    if (!Office.context || !Office.context.document) return;
+    Office.context.document.setSelectedDataAsync(text, { coercionType: Office.CoercionType.Text }, result => {
+      if (result.status === Office.AsyncResultStatus.Failed) {
+        console.warn('Failed to insert into doc:', result.error);
+      }
+    });
+  }
+
+  function addHistoryEntry(entry) {
+    if (!historyList) return;
+    const li = document.createElement('li');
+    li.innerHTML = `<strong>Q:</strong> ${entry.q}<br><strong>A:</strong> ${entry.a}`;
+    historyList.prepend(li);
+  }
+
+  function saveHistory() {
+    if (!historyList) return;
+    const items = Array.from(historyList.children).map(li => li.innerText);
+    localStorage.setItem('chatHistory', JSON.stringify(items));
+  }
+
+  if (clearHistoryBt) {
+    clearHistoryBt.addEventListener('click', () => {
+      if (historyList) historyList.innerHTML = '';
+      localStorage.removeItem('chatHistory');
+    });
+  }
+
+}); // <-- Important: close Office.onReady
