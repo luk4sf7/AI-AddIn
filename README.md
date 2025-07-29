@@ -1,6 +1,3 @@
----
-page_type: sample
-
 ## How to run this sample
 
 ### Prerequisites
